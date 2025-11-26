@@ -1,1 +1,16 @@
 /target
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/9bbecc17cabbcbd3112c14d6982b51403b264bfa
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/9bbecc17cabbcbd3112c14d6982b51403b264bfa.lock
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/56c8c186de9040d4fea8daac2ca110f9d412bf04
+.gitignore
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/56c8c186de9040d4fea8daac2ca110f9d412bf04.lock
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/61e23f16c75ff9995b1d2f251d720c6146d21338
+.gitignore
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/61e23f16c75ff9995b1d2f251d720c6146d21338.lock
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5.lock
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/c17ed520ed8438736732a54957a69306b8822215
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/c17ed520ed8438736732a54957a69306b8822215.lock
+.gitignore
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/refs/main
+.fastembed_cache/models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/5f1b8cd78bc4fb444dd171e59b18f3a3af89a079/model.onnx

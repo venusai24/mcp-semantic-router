@@ -1,31 +1,31 @@
 // src/main.rs
-
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
+
+mod semantic;
+use semantic::SemanticEngine;
 
 // --- Data Structures ---
 
-#
+#[derive(Debug, Deserialize, Clone)]
 struct ServerConfig {
     command: String,
     args: Vec<String>,
 }
 
-#
+#[derive(Debug, Deserialize)]
 struct Config {
     servers: std::collections::HashMap<String, ServerConfig>,
 }
 
-#
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct JsonRpcMessage {
     jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,7 +44,10 @@ struct DownstreamServer {
     tx: mpsc::Sender<JsonRpcMessage>,
 }
 
-type RouterState = Arc<DashMap<String, DownstreamServer>>;
+struct RouterState {
+    clients: DashMap<String, DownstreamServer>,
+    semantic: Arc<SemanticEngine>,
+}
 
 // --- Transport Layer ---
 
@@ -59,7 +62,7 @@ async fn spawn_downstream_server(
        .args(&config.args)
        .stdin(Stdio::piped())
        .stdout(Stdio::piped())
-       .stderr(Stdio::inherit()) // Let stderr go to console for debugging
+       .stderr(Stdio::inherit())
        .spawn()
        .context(format!("Failed to spawn {}", server_id))?;
 
@@ -85,7 +88,6 @@ async fn spawn_downstream_server(
         let mut reader = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             if let Ok(msg) = serde_json::from_str::<JsonRpcMessage>(&line) {
-                // Tag message with origin server_id before sending to main loop
                 let _ = router_tx.send((server_id_clone.clone(), msg)).await;
             }
         }
@@ -97,45 +99,41 @@ async fn spawn_downstream_server(
 
 // --- Core Logic ---
 
+// --- Core Logic ---
+
 async fn handle_tools_list(
-    state: &RouterState,
+    _state: &RouterState,
     upstream_id: Value,
 ) -> JsonRpcMessage {
-    let mut all_tools = Vec::new();
-    
-    // We need to query all servers. This is a "Scatter-Gather" pattern.
-    // We assume every downstream server implements "tools/list".
-    
-    // In a real implementation, we would need to track Request IDs here to map
-    // the responses back. For this skeleton, we are simplifying by assuming
-    // we can just wait for a short timeout or until we get results.
-    // *Implementing full ID correlation is the next step.*
-    
-    // NOTE: For this Skeleton Phase, we will just acknowledge the request
-    // and return a placeholder to prove the router works. 
-    // To implement full aggregation, we need to send requests to all children,
-    // create a temporary "pending aggregation" state, and wait for them.
-    
-    // Let's simulate an aggregated tool list to demonstrate the structure:
-    
-    let tool = serde_json::json!({
-        "name": "router_status",
-        "description": "Returns the status of the router and connected servers",
+    // 1. Define the "Meta-Tool"
+    // Instead of showing all 100 tools, we only show this ONE tool.
+    // This forces the Agent to ask us what it needs.
+    let search_tool = serde_json::json!({
+        "name": "search_tools",
+        "description": "Semantic Search. Use this to find relevant tools for your task. Input a natural language query describing what you want to do (e.g., 'save code to git', 'read file').",
         "inputSchema": {
             "type": "object",
-            "properties": {}
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The natural language description of the task"
+                }
+            },
+            "required": ["query"]
         }
     });
-    all_tools.push(tool);
 
-    // Add tools from downstream (conceptually - requires complex async correlation)
-    // In Phase 2, we will implement the RequestId mapping to actually fetch these.
+    let router_status = serde_json::json!({
+        "name": "router_status",
+        "description": "Checks the health of the semantic router.",
+        "inputSchema": { "type": "object", "properties": {} }
+    });
 
     JsonRpcMessage {
         jsonrpc: "2.0".into(),
         id: Some(upstream_id),
         result: Some(serde_json::json!({
-            "tools": all_tools
+            "tools": [search_tool, router_status]
         })),
         error: None,
         method: None,
@@ -148,43 +146,84 @@ async fn handle_tool_call(
     params: Value,
     upstream_id: Value
 ) -> Result<Option<JsonRpcMessage>> {
-    // Extract tool name
     let tool_name = params.get("name")
        .and_then(|n| n.as_str())
        .context("Missing tool name")?;
 
     eprintln!(" Tool call received: {}", tool_name);
 
-    // Routing Logic: Check if tool name is namespaced (e.g. "git__commit")
-    if let Some((server_name, real_tool_name)) = tool_name.split_once("__") {
-        if let Some(server) = state.get(server_name) {
-            // Construct payload for downstream
+    // --- CASE 1: The Agent is searching for tools ---
+    if tool_name == "search_tools" {
+        let query = params.get("arguments")
+            .and_then(|a| a.get("query"))
+            .and_then(|q| q.as_str())
+            .context("Missing 'query' argument")?;
+
+        eprintln!(" Performing Semantic Search for: '{}'", query);
+
+        // 1. Search the index (limit 3 results)
+        let results = state.semantic.search(query, 3).await?;
+
+        // 2. Format the results as a string to give back to the Agent
+        // We return the actual JSON schemas of the found tools so the Agent knows how to use them.
+        let found_tools: Vec<Value> = results.iter().map(|t| {
+            // We namespace the tool name so the Router knows where to send it later
+            let mut schema = t.full_schema.clone();
+            let namespaced_name = format!("{}___{}", t.server_id, t.name);
+            schema["name"] = Value::String(namespaced_name);
+            schema
+        }).collect();
+
+        return Ok(Some(JsonRpcMessage {
+            jsonrpc: "2.0".into(),
+            id: Some(upstream_id),
+            result: Some(serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Found {} relevant tools. Use these schemas to perform your task:\n{}", 
+                        found_tools.len(), 
+                        serde_json::to_string_pretty(&found_tools)?
+                    )
+                }]
+            })),
+            error: None,
+            method: None,
+            params: None,
+        }));
+    }
+
+    // --- CASE 2: The Agent is calling a specific downstream tool ---
+    // Note: We use "___" (3 underscores) as a separator to avoid conflict with tool names using single underscores
+    if let Some((server_name, real_tool_name)) = tool_name.split_once("___") {
+        if let Some(server) = state.clients.get(server_name) {
             let mut new_params = params.clone();
+            
+            // Fix the params to remove the namespaced name
             new_params["name"] = Value::String(real_tool_name.to_string());
 
             let forward_msg = JsonRpcMessage {
                 jsonrpc: "2.0".into(),
-                id: Some(upstream_id), // In production, we map this ID!
+                id: Some(upstream_id),
                 method: Some("tools/call".into()),
                 params: Some(new_params),
                 result: None,
                 error: None,
             };
 
-            server.tx.send(forward_msg).await?;
-            // We don't return a response here immediately; the downstream 
-            // server's response will be handled by the main loop.
+            let tx = server.tx.clone();
+            tx.send(forward_msg).await?;
+            
             return Ok(None); 
         }
     }
 
-    // If internal tool
+    // --- CASE 3: Internal Tools ---
     if tool_name == "router_status" {
         return Ok(Some(JsonRpcMessage {
             jsonrpc: "2.0".into(),
             id: Some(upstream_id),
             result: Some(serde_json::json!({
-                "content":
+                "content": [{"type": "text", "text": "Router is Online"}]
             })),
             error: None,
             method: None,
@@ -204,27 +243,68 @@ async fn handle_tool_call(
 
 // --- Main Entry Point ---
 
+async fn mock_ingest_tools(state: Arc<RouterState>) {
+    let git_tools = serde_json::json!([
+        {
+            "name": "git_commit",
+            "description": "Records changes to the repository",
+            "inputSchema": {}
+        },
+        {
+            "name": "git_push",
+            "description": "Updates remote refs along with associated objects",
+            "inputSchema": {}
+        }
+    ]);
+    
+    let fs_tools = serde_json::json!([
+        {
+            "name": "read_file",
+            "description": "Reads the contents of a file from the disk",
+            "inputSchema": {}
+        },
+        {
+            "name": "list_directory",
+            "description": "Lists files in a specific directory",
+            "inputSchema": {}
+        }
+    ]);
+
+    if let Some(arr) = git_tools.as_array() {
+        let _ = state.semantic.ingest_tools("git_server".into(), arr.clone()).await;
+    }
+    if let Some(arr) = fs_tools.as_array() {
+        let _ = state.semantic.ingest_tools("fs_server".into(), arr.clone()).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. Load Config
     let config_str = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"servers\":{}}".into());
     let config: Config = serde_json::from_str(&config_str)?;
 
+    eprintln!("Initializing Semantic Engine...");
+    let semantic = Arc::new(SemanticEngine::new()?);
+    
     // 2. Setup State
-    let state = Arc::new(DashMap::new());
+    let state = Arc::new(RouterState {
+        clients: DashMap::new(),
+        semantic: semantic.clone(),
+    });
+
     let (router_tx, mut router_rx) = mpsc::channel::<(String, JsonRpcMessage)>(100);
 
     // 3. Spawn Downstream Servers
     for (id, server_conf) in config.servers {
         if let Ok(server) = spawn_downstream_server(id.clone(), server_conf, router_tx.clone()).await {
-            state.insert(id, server);
+            state.clients.insert(id, server);
         }
     }
 
     // 4. Setup Upstream (Stdin/Stdout)
     let (upstream_tx, mut upstream_rx) = mpsc::channel::<JsonRpcMessage>(100);
     
-    // Task: Read from Stdin (Upstream Client)
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin).lines();
@@ -235,8 +315,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Task: Write to Stdout (Upstream Client)
-    // We use a separate channel for responses so we can send from anywhere
     let (response_tx, mut response_rx) = mpsc::channel::<JsonRpcMessage>(100);
     tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
@@ -251,15 +329,15 @@ async fn main() -> Result<()> {
 
     eprintln!(" Ready. Listening on stdio...");
 
+    mock_ingest_tools(state.clone()).await;
+
     // 5. Main Event Loop
     loop {
         tokio::select! {
-            // Handle Upstream Request (Claude -> Router)
             Some(msg) = upstream_rx.recv() => {
                 if let Some(method) = &msg.method {
                     match method.as_str() {
                         "initialize" => {
-                            // Basic handshake
                             let response = JsonRpcMessage {
                                 jsonrpc: "2.0".into(),
                                 id: msg.id,
@@ -275,38 +353,27 @@ async fn main() -> Result<()> {
                             response_tx.send(response).await?;
                         }
                         "tools/list" => {
-                            // Phase 1: Return aggregated list (stubbed for now)
                             if let Some(id) = msg.id {
                                 let response = handle_tools_list(&state, id).await;
                                 response_tx.send(response).await?;
                             }
                         }
                         "tools/call" => {
-                            // Phase 1: Basic Routing
                             if let Some(params) = msg.params {
                                 if let Some(id) = msg.id {
                                     if let Some(response) = handle_tool_call(&state, params, id).await? {
                                         response_tx.send(response).await?;
                                     }
-                                    // If None, it means we forwarded it, and we await the response in the other branch
                                 }
                             }
                         }
-                        _ => {
-                            // Ignore other notifications for now
-                        }
+                        _ => {}
                     }
                 }
             }
 
-            // Handle Downstream Response (Server -> Router -> Claude)
-            Some((server_id, msg)) = router_rx.recv() => {
-                // Here is where we would map the ID back to the original upstream ID.
-                // For Phase 1, we just forward "Result" messages blindly up.
-                if msg.result.is_some() |
-
-| msg.error.is_some() {
-                    // Forward response to upstream
+            Some((_server_id, msg)) = router_rx.recv() => {
+                if msg.result.is_some() || msg.error.is_some() {
                     response_tx.send(msg).await?;
                 }
             }

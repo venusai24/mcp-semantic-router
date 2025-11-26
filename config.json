@@ -2,7 +2,14 @@
   "servers": {
     "git": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "mcp/git"] 
+      "args": [
+        "run", 
+        "-i",           
+        "--rm", 
+        "-v", "/home/venu/DevProjects/mcp-router:/projects", 
+        "-w", "/projects",         
+        "mcp/git"
+      ] 
     },
     "memory": {
       "command": "npx",
