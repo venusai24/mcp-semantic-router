@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "git": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "mcp/git"] 
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  }
+}

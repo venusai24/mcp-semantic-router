@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "rust-router": {
+      "command": "${workspaceFolder}/target/release/mcp-router",
+      "args":,
+      "env": {
+        "RUST_LOG": "info"
+      },
+      "disabled": false,
+      "autoApprove":
+    }
+  }
+}
