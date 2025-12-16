@@ -1,11 +1,17 @@
 use anyhow::Result;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize}; // Added Serialize/Deserialize
 use serde_json::Value;
 use std::sync::{Arc, Mutex, RwLock};
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+
+const INDEX_FILE: &str = "router_index.bin";
 
 /// Represents a tool stored in our semantic index
-#[derive(Debug, Clone)]
+// FIX: Added Serialize, Deserialize so we can save to disk
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedTool {
     pub server_id: String,
     pub name: String,
@@ -26,11 +32,39 @@ impl SemanticEngine {
         options.show_download_progress = true;
 
         let model = TextEmbedding::try_new(options)?;
+        
+        // 1. Try to load existing index from disk
+        let initial_index = Self::load_from_disk().unwrap_or_else(|_| {
+            println!("📂 No existing index found. Starting fresh.");
+            Vec::new()
+        });
 
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
-            index: Arc::new(RwLock::new(Vec::new())),
+            index: Arc::new(RwLock::new(initial_index)),
         })
+    }
+
+    /// Internal helper to load index
+    fn load_from_disk() -> Result<Vec<IndexedTool>> {
+        if !std::path::Path::new(INDEX_FILE).exists() {
+            return Ok(Vec::new());
+        }
+        
+        let file = File::open(INDEX_FILE)?;
+        let reader = BufReader::new(file);
+        let tools: Vec<IndexedTool> = bincode::deserialize_from(reader)?;
+        
+        println!("💾 Loaded {} tools from disk cache.", tools.len());
+        Ok(tools)
+    }
+
+    /// Internal helper to save index
+    fn save_to_disk(tools: &Vec<IndexedTool>) -> Result<()> {
+        let file = File::create(INDEX_FILE)?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, tools)?;
+        Ok(())
     }
 
     pub async fn ingest_tools(&self, server_id: String, tools: Vec<Value>) -> Result<()> {
@@ -53,27 +87,38 @@ impl SemanticEngine {
 
         let model_clone = self.model.clone(); 
         
-        // FIX: Added 'mut' here
+        // Generate embeddings
         let embeddings = tokio::task::spawn_blocking(move || {
             let mut model = model_clone.lock().unwrap(); 
             model.embed(texts_to_embed, None)
         }).await??;
 
-        let mut index_guard = self.index.write().unwrap();
-        
-        index_guard.retain(|t| t.server_id != server_id);
+        {
+            let mut index_guard = self.index.write().unwrap();
+            
+            // Remove old tools for this server
+            index_guard.retain(|t| t.server_id != server_id);
 
-        for ((name, description, schema), embedding) in tools_to_index.into_iter().zip(embeddings) {
-            index_guard.push(IndexedTool {
-                server_id: server_id.clone(),
-                name,
-                description,
-                full_schema: schema,
-                embedding,
-            });
+            // Add new tools
+            for ((name, description, schema), embedding) in tools_to_index.into_iter().zip(embeddings) {
+                index_guard.push(IndexedTool {
+                    server_id: server_id.clone(),
+                    name,
+                    description,
+                    full_schema: schema,
+                    embedding,
+                });
+            }
+            println!("Indexed {} tools for server: {}", index_guard.len(), server_id);
+
+            // 2. Save updated index to disk
+            if let Err(e) = Self::save_to_disk(&index_guard) {
+                eprintln!("⚠️ Failed to persist index to disk: {}", e);
+            } else {
+                println!("💾 Index persisted to {}", INDEX_FILE);
+            }
         }
         
-        println!("Indexed {} tools for server: {}", index_guard.len(), server_id);
         Ok(())
     }
 
@@ -81,7 +126,6 @@ impl SemanticEngine {
         let model_clone = self.model.clone();
         let query_string = query.to_string();
 
-        // FIX: Added 'mut' here
         let query_embedding = tokio::task::spawn_blocking(move || {
             let mut model = model_clone.lock().unwrap();
             let vec = model.embed(vec![query_string], None)?;

@@ -7,13 +7,20 @@
         "-i",           
         "--rm", 
         "-v", "/home/venu/DevProjects/mcp-router:/projects", 
-        "-w", "/projects",         
+        "-w", "/projects",   
+        "-e", "GIT_CONFIG_COUNT=1", 
+        "-e", "GIT_CONFIG_KEY_0=safe.directory", 
+        "-e", "GIT_CONFIG_VALUE_0=*",      
         "mcp/git"
       ] 
     },
     "memory": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "mock-test": {
+      "command": "python3",
+      "args": ["mock_server.py"]
     }
   }
 }
